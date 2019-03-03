@@ -1,27 +1,4 @@
-package msgpack
-
-// data types
-// https://github.com/msgpack/msgpack/blob/master/spec.md
-const (
-	Map15LengthMask byte = 0x80
-	Map16                = 0xde
-	Map32                = 0xdf
-
-	Array15LengthMask byte = 0x90
-
-	String31LengthMask byte = 0xa0
-
-	Bin8 byte = 0xc4
-
-	Uint8  byte = 0xcc
-	Uint16      = 0xcd
-	Uint32      = 0xce
-	Uint64      = 0xcf
-	Int8        = 0xd0
-	Int16       = 0xd1
-	Int32       = 0xd2
-	Int64       = 0xd3
-)
+package transport
 
 // https://github.com/tarantool/tarantool/blob/1.9/src/box/iproto_constants.h
 
@@ -42,15 +19,6 @@ const (
 //<iproto_data>          ::= 0x30
 //<iproto_error>         ::= 0x31
 
-const (
-	KeyHeader   byte = 0x00
-	KeySync          = 0x01
-	KeyTuple         = 0x21
-	KeyUserName      = 0x23
-	KeyData          = 0x30
-	KeyError         = 0x31
-)
-
 //-- -- Значение ключа <code> в запросе может быть следующим:
 //-- Ключи для команд пользователя
 //<iproto_select>       ::= 0x01
@@ -63,6 +31,7 @@ const (
 //<iproto_eval>         ::= 0x08
 //<iproto_upsert>       ::= 0x09
 //<iproto_call>         ::= 0x0a
+
 //-- Коды для команд администратора
 //-- (включая коды для инициализации набора реплик и выбора мастера)
 //<iproto_ping>         ::= 0x40
@@ -70,6 +39,30 @@ const (
 //<iproto_subscribe>    ::= 0x42
 //<iproto_request_vote> ::= 0x43
 //
+
 //-- -- Значение для ключа <code> в ответе может быть следующим:
 //<iproto_ok>           ::= 0x00
 //<iproto_type_error>   ::= 0x8XXX /* где XXX -- это значение в errcode.h */
+
+// Map keys
+const (
+	KeyCode     uint8 = 0x00
+	KeySync           = 0x01
+	KeySchema         = 0x05
+	KeyTuple          = 0x21
+	KeyUserName       = 0x23
+	KeyData           = 0x30
+	KeyError          = 0x31
+)
+
+// Request codes
+const (
+	RequestAuth uint32 = 0x07
+)
+
+// Response code
+const (
+	CodeOK        uint32 = 0x0000
+	CodeErrorMask        = 0x8000
+	ErrorCodeMask        = 0x0fff
+)

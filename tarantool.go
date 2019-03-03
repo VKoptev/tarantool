@@ -2,14 +2,14 @@ package tarantool
 
 import (
 	"bufio"
-	"crypto/sha1"
-	"encoding/base64"
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"tarantool/transport"
 )
 
 type Tarantool struct {
@@ -30,12 +30,12 @@ func New(user, pass string) (*Tarantool, error) {
 	}, nil
 }
 
-func (t *Tarantool) ConnectTo(cluster []string) error {
+func (t *Tarantool) ConnectTo(ctx context.Context, cluster []string) error {
 	if err := t.disconnect(); err != nil {
 		return err
 	}
 	t.cluster = cluster
-	if err := t.connect(); err != nil {
+	if err := t.connect(ctx); err != nil {
 		return err
 	}
 
@@ -59,10 +59,12 @@ func (t *Tarantool) disconnect() error {
 	if err := t.conn.Close(); err != nil {
 		return fmt.Errorf("couldn't close connection: %v", err)
 	}
+	t.conn = nil
+
 	return nil
 }
 
-func (t *Tarantool) connect() error {
+func (t *Tarantool) connect(ctx context.Context) error {
 	if atomic.LoadUint32(&t.connected) == 1 {
 		return fmt.Errorf("already connected")
 	}
@@ -78,26 +80,30 @@ func (t *Tarantool) connect() error {
 	// round robin the Bobbin the big-bellied Ben
 	addr, t.cluster = t.cluster[0], append(t.cluster[1:], t.cluster[0])
 
-	t.conn, err = net.Dial("tcp", addr)
+	d := &net.Dialer{}
+	t.conn, err = d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("couldn't connect: %v", err)
 	}
 
-	r := bufio.NewReader(t.conn)
+	rd := bufio.NewReader(t.conn)
+
 	// ignore first line
-	_, err = r.ReadString('\n')
+	_, err = rd.ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("couldn't read hello: %v", err)
 	}
 
-	hash, err := r.ReadString('\n')
+	hash, err := rd.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return fmt.Errorf("couldn't read hash: %v", err)
 	}
 
-	err = t.auth(strings.TrimRight(hash, " \n"))
-	if err != nil {
-		return fmt.Errorf("couldn't authorize: %v", err)
+	if t.user != "" {
+		err = t.auth(ctx, strings.TrimRight(hash, " \n"))
+		if err != nil {
+			return fmt.Errorf("couldn't authorize: %v", err)
+		}
 	}
 
 	atomic.StoreUint32(&t.connected, 1)
@@ -105,70 +111,24 @@ func (t *Tarantool) connect() error {
 	return nil
 }
 
-func (t *Tarantool) auth(hash string) error {
-	if t.user == "" {
-		return nil
-	}
-
+func (t *Tarantool) auth(ctx context.Context, hash string) error {
 	t.authMutex.RLock()
 	defer t.authMutex.RUnlock()
 
-	salt, err := base64.StdEncoding.DecodeString(hash)
+	scramble, err := scramble(hash, t.pass)
 	if err != nil {
-		return fmt.Errorf("couldn't decode hash: %v", err)
-	}
-	step1 := sha1.Sum([]byte(t.pass))
-	step2 := sha1.Sum(step1[:])
-	step3 := sha1.Sum(append(salt, step2[:]...))
-	var scramble [sha1.Size]byte
-	for i := 0; i < sha1.Size; i++ {
-		scramble[i] = step1[i] ^ step3[i]
+		return err
 	}
 
-	bb, err := auth{
-		User:     t.user,
-		Scramble: scramble,
-	}.Bytes()
+	err = transport.Write(ctx, t.conn, auth{username: t.user, scramble: scramble})
 	if err != nil {
-		return fmt.Errorf("couldn't marshal auth request: %v", err)
+		return fmt.Errorf("couldn't make auth request: %v", err)
 	}
 
-	n, err := t.conn.Write(bb)
-	if err != nil {
-		return fmt.Errorf("couldn't make request: %v", err)
-	}
-	if n != len(bb) {
-		return fmt.Errorf("wrong length of written bytes: %d; expected: %d", n, len(bb))
-	}
-
-	err = read(t.conn)
+	r, err := transport.Read(ctx, t.conn)
 	if err != nil {
 		return fmt.Errorf("couldn't read auth response: %v", err)
 	}
 
-	return nil
-}
-
-func read(r io.Reader) error {
-
-	var bb []byte
-	p := make([]byte, 1024)
-	done := false
-	for !done {
-		n, err := r.Read(p)
-		if err != nil && err != io.EOF {
-			return fmt.Errorf("couldn't read: %v", err)
-		}
-		if n == 0 && err != io.EOF {
-			return fmt.Errorf("couldn't read: %v", io.ErrUnexpectedEOF)
-		}
-		bb = append(bb, p[:n]...)
-		if err == io.EOF {
-			done = true
-		}
-	}
-
-	_, err := parseResponse(bb)
-
-	return err
+	return fmt.Errorf("response: %+v", r)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -54,13 +55,14 @@ func main() {
 		return d.Serve(ctx, opts.DebugListen, logger)
 	})
 
+	ErrCanceled := errors.New("canceled")
 	gr.Go(func() error {
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 		for {
 			select {
 			case <-ctx.Done():
-				return nil
+				return ErrCanceled
 			case <-sigs:
 				cancel()
 				logger.Printf("[INFO] Caught stop signal. Exiting ...")
@@ -74,7 +76,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		err = t.ConnectTo(opts.TTCluster)
+		err = t.ConnectTo(ctx, opts.TTCluster)
 		if err != nil {
 			return err
 		}

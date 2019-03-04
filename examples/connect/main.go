@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"tarantool"
 	"tarantool/debug"
+	"time"
 
 	"github.com/hashicorp/logutils"
 	"github.com/jessevdk/go-flags"
@@ -21,9 +22,10 @@ func main() {
 		DebugListen string `long:"debug.listen" env:"EDITOR_DEBUG_LISTEN" default:":6060" description:"Interface for serve debug information(metrics/health/pprof)"`
 		Verbose     bool   `short:"v" env:"VERBOSE" description:"Enable verbose log output"`
 
-		TTCluster []string `long:"tt.cluster" env:"TT_CLUSTER" description:"Hosts to tarantool cluster"`
-		TTUser    string   `long:"tt.user" env:"TT_USER" description:"Username to auth at tarantool cluster"`
-		TTPass    string   `long:"tt.pass" env:"TT_PASS" description:"Password to auth at tarantool cluster"`
+		TTCluster []string      `long:"tt.cluster" env:"TT_CLUSTER" description:"Hosts to tarantool cluster"`
+		TTUser    string        `long:"tt.user" env:"TT_USER" description:"Username to auth at tarantool cluster"`
+		TTPass    string        `long:"tt.pass" env:"TT_PASS" description:"Password to auth at tarantool cluster"`
+		TTTimeout time.Duration `long:"tt.timeout" env:"TT_TIMEOUT" default:"3s" description:"Timeout connect to tarantool cluster"`
 	}{}
 
 	_, err := flags.Parse(&opts)
@@ -72,16 +74,25 @@ func main() {
 
 	gr.Go(func() error {
 
-		t, err := tarantool.New(opts.TTUser, opts.TTPass)
+		t, err := tarantool.New(tarantool.Config{
+			User:    opts.TTUser,
+			Pass:    opts.TTPass,
+			Timeout: opts.TTTimeout,
+		})
 		if err != nil {
 			return err
 		}
-		err = t.ConnectTo(ctx, opts.TTCluster)
+		err = t.ChangeHosts(ctx, opts.TTCluster)
 		if err != nil {
 			return err
 		}
+		logger.Printf("[DEBUG] tarantool: %+v", t)
 
-		logger.Printf("[DEBUG] connected: %+v", t)
+		s, err := t.Session(ctx)
+		if err != nil {
+			return err
+		}
+		logger.Printf("[DEBUG] session: %+v", s)
 
 		err = t.Close()
 		if err != nil {

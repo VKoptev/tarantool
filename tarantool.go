@@ -1,134 +1,104 @@
 package tarantool
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
-	"net"
-	"strings"
 	"sync"
-	"sync/atomic"
-	"tarantool/transport"
+	"time"
 )
 
-type Tarantool struct {
-	authMutex *sync.RWMutex
-	user      string
-	pass      string
-	cluster   []string
-	connected uint32
-
-	conn net.Conn
+type Config struct {
+	User    string
+	Pass    string
+	Timeout time.Duration
 }
 
-func New(user, pass string) (*Tarantool, error) {
+type Tarantool struct {
+	cfg     Config
+	cluster []string
+	pool    *sync.Map
+
+	mu      *sync.RWMutex
+	freeIDs []uint64
+	lastID  uint64
+}
+
+func New(cfg Config) (*Tarantool, error) {
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 30 * time.Second
+	}
 	return &Tarantool{
-		authMutex: new(sync.RWMutex),
-		user:      user,
-		pass:      pass,
+		cfg:  cfg,
+		pool: new(sync.Map),
+		mu:   new(sync.RWMutex),
 	}, nil
 }
 
-func (t *Tarantool) ConnectTo(ctx context.Context, cluster []string) error {
-	if err := t.disconnect(); err != nil {
+func (t *Tarantool) ChangeHosts(ctx context.Context, hosts []string) error {
+	if err := t.Close(); err != nil {
 		return err
 	}
-	t.cluster = cluster
-	if err := t.connect(ctx); err != nil {
-		return err
-	}
-
+	t.cluster = hosts
 	return nil
 }
 
 func (t *Tarantool) Close() error {
-	return t.disconnect()
+	var err error
+	t.pool.Range(func(key, value interface{}) bool {
+		err = value.(*Session).Close()
+		return err == nil
+	})
+
+	return err
 }
 
-func (t *Tarantool) disconnect() error {
-	if atomic.LoadUint32(&t.connected) == 0 {
-		return nil
-	}
-
-	atomic.StoreUint32(&t.connected, 0)
-	if t.conn == nil {
-		return nil
-	}
-
-	if err := t.conn.Close(); err != nil {
-		return fmt.Errorf("couldn't close connection: %v", err)
-	}
-	t.conn = nil
-
-	return nil
-}
-
-func (t *Tarantool) connect(ctx context.Context) error {
-	if atomic.LoadUint32(&t.connected) == 1 {
-		return fmt.Errorf("already connected")
-	}
-
+func (t *Tarantool) Session(ctx context.Context) (*Session, error) {
 	if len(t.cluster) == 0 {
-		return fmt.Errorf("empty cluster")
+		return nil, fmt.Errorf("empty cluster")
 	}
 
-	var (
-		addr string
-		err  error
-	)
-	// round robin the Bobbin the big-bellied Ben
+	var addr string
+	t.mu.Lock()
+	// round Robin the Bobbin the big-bellied Ben
 	addr, t.cluster = t.cluster[0], append(t.cluster[1:], t.cluster[0])
+	t.mu.Unlock()
 
-	d := &net.Dialer{}
-	t.conn, err = d.DialContext(ctx, "tcp", addr)
+	c := session(sessionConfig{
+		addr:    addr,
+		user:    t.cfg.User,
+		pass:    t.cfg.Pass,
+		timeout: t.cfg.Timeout,
+	})
+	err := c.connect(ctx)
 	if err != nil {
-		return fmt.Errorf("couldn't connect: %v", err)
+		return nil, err
 	}
 
-	rd := bufio.NewReader(t.conn)
-
-	// ignore first line
-	_, err = rd.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("couldn't read hello: %v", err)
+	t.mu.Lock()
+	var id uint64
+	if len(t.freeIDs) > 0 {
+		id, t.freeIDs = t.freeIDs[0], t.freeIDs[1:]
+	} else {
+		id = t.lastID
+		t.lastID++
 	}
+	t.mu.Unlock()
 
-	hash, err := rd.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("couldn't read hash: %v", err)
-	}
+	t.pool.Store(id, c)
+	go t.waitConnectionClose(ctx, id, c)
 
-	if t.user != "" {
-		err = t.auth(ctx, strings.TrimRight(hash, " \n"))
-		if err != nil {
-			return fmt.Errorf("couldn't authorize: %v", err)
+	return c, nil
+}
+
+func (t *Tarantool) waitConnectionClose(ctx context.Context, id uint64, c *Session) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.done:
+			t.pool.Delete(id)
+			t.freeIDs = append(t.freeIDs, id)
+			return
 		}
 	}
-
-	atomic.StoreUint32(&t.connected, 1)
-
-	return nil
-}
-
-func (t *Tarantool) auth(ctx context.Context, hash string) error {
-	t.authMutex.RLock()
-	defer t.authMutex.RUnlock()
-
-	scramble, err := scramble(hash, t.pass)
-	if err != nil {
-		return err
-	}
-
-	err = transport.Write(ctx, t.conn, auth{username: t.user, scramble: scramble})
-	if err != nil {
-		return fmt.Errorf("couldn't make auth request: %v", err)
-	}
-
-	r, err := transport.Read(ctx, t.conn)
-	if err != nil {
-		return fmt.Errorf("couldn't read auth response: %v", err)
-	}
-
-	return fmt.Errorf("response: %+v", r)
 }

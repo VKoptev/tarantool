@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"github.com/vmihailenco/msgpack"
 	"io"
-	"reflect"
 )
 
 type Response struct {
@@ -51,7 +50,6 @@ func Read(ctx context.Context, rd io.Reader) (Response, error) {
 	}
 
 	// body
-	fmt.Printf("body: %v %v\n", reflect.ValueOf(r.Body).Type(), r.Body)
 	if r.IsError {
 		if _, ok := r.Body.(map[int8]string); !ok {
 			return r, fmt.Errorf("couldn't cast type of error")
@@ -61,7 +59,7 @@ func Read(ctx context.Context, rd io.Reader) (Response, error) {
 		return r, nil
 	}
 
-	return r, fmt.Errorf("debug: %+v", r)
+	return r, nil
 }
 
 func read(ctx context.Context, r io.Reader) ([]byte, error) {
